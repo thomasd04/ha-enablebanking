@@ -14,6 +14,7 @@ Endpoints implemented:
     POST /sessions                        -> exchange auth code for session_id
     GET  /sessions/{session_id}           -> account list and session status
     GET  /accounts/{account_id}/balances  -> balance objects for one account
+    GET  /accounts/{account_id}/transactions -> recent read-only transactions
 
 See https://enablebanking.com/docs/api/reference/ for the full surface.
 """
@@ -202,7 +203,13 @@ class EnableBankingClient:
             "%Y-%m-%dT%H:%M:%S.000000+00:00"
         )
         payload: dict[str, Any] = {
-            "access": {"valid_until": valid_until},
+            # Enable Banking sessions are capability-scoped. Request both
+            # AIS capabilities explicitly; no payment initiation is requested.
+            "access": {
+                "balances": True,
+                "transactions": True,
+                "valid_until": valid_until,
+            },
             "aspsp": {"name": aspsp_name, "country": aspsp_country},
             "psu_type": psu_type,
             "state": secrets.token_urlsafe(16),
@@ -262,6 +269,45 @@ class EnableBankingClient:
         if not isinstance(balances, list):
             return []
         return balances
+
+    async def async_get_account_transactions(self, account_id: str) -> list[dict[str, Any]]:
+        """Return up to 250 normalized recent transactions for an account.
+
+        Enable Banking pages transaction results with ``continuation_key``.
+        We keep the requested period and all other query parameters constant
+        between pages, as required by its API. A bounded history limits both
+        API load and the size of HA's state attributes/cache.
+        """
+        date_from = (datetime.now(UTC) - timedelta(days=90)).date().isoformat()
+        params = {"date_from": date_from}
+        transactions: list[dict[str, Any]] = []
+        continuation_key: str | None = None
+
+        # Five pages cap the request volume at one per day per account while
+        # still allowing a substantial recent history for active accounts.
+        for _ in range(5):
+            page_params = dict(params)
+            if continuation_key:
+                page_params["continuation_key"] = continuation_key
+            data = await self._request(
+                "GET", f"/accounts/{account_id}/transactions", params=page_params
+            )
+            if not isinstance(data, dict):
+                raise EnableBankingAPIError(
+                    f"Unexpected transactions payload type: {type(data).__name__}"
+                )
+            page = data.get("transactions", [])
+            if isinstance(page, list):
+                transactions.extend(
+                    _normalize_transaction(item) for item in page if isinstance(item, dict)
+                )
+            continuation_key = data.get("continuation_key")
+            if not isinstance(continuation_key, str) or not continuation_key:
+                break
+            if len(transactions) >= 250:
+                break
+
+        return transactions[:250]
 
     async def async_get_account_details(self, account_id: str) -> dict[str, Any]:
         """Return the account-details object for a single account.
@@ -468,6 +514,36 @@ class EnableBankingClient:
                 _LOGGER.warning("Could not parse amount for %s; picked=%r", uid, picked)
                 continue
 
+            transactions = prev.transactions if prev else []
+            transactions_last_fetched = prev.transactions_last_fetched if prev else None
+            today = datetime.now(UTC).date()
+            if (
+                transactions_last_fetched is None
+                or transactions_last_fetched.date() < today
+            ):
+                # Transaction access is polled once daily, separate from the
+                # four-times-daily balance schedule, to stay conservative with
+                # bank-side PSD2 request limits.
+                transactions_last_fetched = datetime.now(UTC)
+                try:
+                    transactions = await self.async_get_account_transactions(uid)
+                except EnableBankingSessionError:
+                    raise
+                except EnableBankingAuthenticationError as err:
+                    # Existing sessions may not have been consented for the
+                    # newly requested transactions scope. Keep balance updates
+                    # working; the user must reauthorize to populate this feed.
+                    _LOGGER.warning(
+                        "Transactions unavailable for %s; reauthorize this account "
+                        "with transaction access: %s",
+                        name,
+                        err,
+                    )
+                except EnableBankingRateLimitError as err:
+                    _LOGGER.warning("Transactions rate-limited for %s: %s", name, err)
+                except (EnableBankingAPIError, EnableBankingConnectionError) as err:
+                    _LOGGER.warning("Could not fetch transactions for %s: %s", name, err)
+
             out[stable_id] = AccountBalance(
                 account_id=uid,
                 stable_id=stable_id,
@@ -478,6 +554,8 @@ class EnableBankingClient:
                 balance=amount,
                 balance_type=picked.get("balance_type"),
                 reference_date=picked.get("reference_date"),
+                transactions=transactions,
+                transactions_last_fetched=transactions_last_fetched,
             )
 
         _LOGGER.debug(
@@ -486,6 +564,48 @@ class EnableBankingClient:
             len(rate_limited),
         )
         return out, rate_limited
+
+
+def _normalize_transaction(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep only fields useful for a read-only transaction feed."""
+    amount = item.get("transaction_amount") or item.get("amount") or {}
+    if not isinstance(amount, dict):
+        amount = {}
+    creditor = item.get("creditor")
+    debtor = item.get("debtor")
+    counterparty = None
+    for party in (creditor, debtor):
+        if isinstance(party, dict) and isinstance(party.get("name"), str):
+            counterparty = party["name"]
+            break
+    remittance = item.get("remittance_information")
+    if isinstance(remittance, list):
+        remittance = " · ".join(str(line) for line in remittance if line)
+    elif remittance is not None and not isinstance(remittance, str):
+        remittance = str(remittance)
+    code = item.get("bank_transaction_code")
+    code_description = code.get("description") if isinstance(code, dict) else None
+
+    normalized = {
+        "entry_reference": item.get("entry_reference"),
+        "transaction_id": item.get("transaction_id"),
+        "status": item.get("status"),
+        "booking_date": item.get("booking_date"),
+        "value_date": item.get("value_date"),
+        "transaction_date": item.get("transaction_date"),
+        "amount": amount.get("amount"),
+        "currency": amount.get("currency"),
+        "credit_debit_indicator": item.get("credit_debit_indicator"),
+        "counterparty": counterparty,
+        "remittance_information": remittance,
+        "reference_number": item.get("reference_number"),
+        "bank_transaction_code": code_description,
+        "note": item.get("note"),
+    }
+    return {
+        key: value[:256] if isinstance(value, str) else value
+        for key, value in normalized.items()
+    }
 
 
 def _collect_accounts(
