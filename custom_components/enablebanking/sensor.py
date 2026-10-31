@@ -65,7 +65,25 @@ TRANSACTIONS_SENSOR = EnableBankingSensorDescription(
     account_attrs_fn=lambda acc: {
         # HA state attributes are intended for compact summaries. The API
         # cache keeps the bounded 90-day result; expose only the latest 20.
-        "transactions": acc.transactions[:20],
+        "transactions": [
+            {
+                "booking_date": transaction.get("booking_date"),
+                "value_date": transaction.get("value_date"),
+                "amount": transaction.get("amount"),
+                "currency": transaction.get("currency"),
+                "status": transaction.get("status"),
+                "credit_debit_indicator": transaction.get("credit_debit_indicator"),
+                "counterparty": str(transaction.get("counterparty") or "")[:80],
+                "remittance_information": str(
+                    transaction.get("remittance_information") or ""
+                )[:120],
+                "reference_number": str(transaction.get("reference_number") or "")[:40],
+                "bank_transaction_code": str(
+                    transaction.get("bank_transaction_code") or ""
+                )[:80],
+            }
+            for transaction in acc.transactions[:20]
+        ],
         "transactions_last_fetched_at": (
             acc.transactions_last_fetched.isoformat()
             if acc.transactions_last_fetched
