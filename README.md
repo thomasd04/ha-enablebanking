@@ -3,7 +3,7 @@
 [![Validate](https://github.com/SurfHost/ha-enablebanking/actions/workflows/validate.yml/badge.svg)](https://github.com/SurfHost/ha-enablebanking/actions/workflows/validate.yml)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
 
-A Home Assistant custom integration that shows account balances from any bank supported by **[Enable Banking](https://enablebanking.com/)** > including ASN Bank, N26, Revolut, Openbank, and hundreds more.
+A Home Assistant custom integration that shows account balances and recent transactions from any bank supported by **[Enable Banking](https://enablebanking.com/)** > including ASN Bank, N26, Revolut, Openbank, and hundreds more.
 
 Each bank connection is a separate config entry, so you can add as many as you like and see all balances on one dashboard.
 
@@ -13,11 +13,13 @@ The integration uses **Enable Banking** as the licensed TPP (Third Party Provide
 
 - One config entry per bank > add ASN Bank, N26, Revolut, Openbank independently
 - Balance sensor per discovered account under each entry
+- Read-only transactions sensor per account (up to 250 results from the last 90 days; refreshed once daily)
 - Revolut Business supported: select ASPSP "Revolut" with account type "Business"
 - EUR (and other currencies) with `state_class: total`, `device_class: monetary`
 - Attributes per sensor: IBAN, account name, product, currency, balance type, reference date, bank name, `last_polled_at`, `last_error`, `stale`, `consent_expires_at`, `consent_days_remaining`
 - Scheduled polling at fixed local times (10:00, 14:00, 18:00, 22:00) with per-entry minute jitter > exactly four polls/day, aligned with PSD2's cap
 - **Never-unavailable sensors**: balances are cached to disk and displayed even during rate-limits, network blips, consent expiry, or the first moment after an HA restart before the first poll runs
+- Transaction access is requested as read-only account information; each bank may limit fields or omit pending/scheduled transfers
 - Graceful 180-day consent expiry: proactive 14-day warning, renew early with **Reconfigure**, automatic reauth UI when the consent lapses
 - **Self-renewing API token**: the integration stores your application private key and signs a fresh 23-hour JWT itself, so there is no token to paste and nothing that silently expires
 - Reauth flow that revalidates the existing bank session first, so an expired token is a one-click fix with no bank round-trip
@@ -49,12 +51,12 @@ A full walkthrough lives at [enablebanking.com/docs/api/quick-start/](https://en
 
 ### HACS (custom repository)
 
-[![Add Repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=SurfHost&repository=ha-enablebanking&category=integration)
+[![Add Repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=thomasd04&repository=ha-enablebanking&category=integration)
 
 Or manually in HACS:
 
 1. HACS > three-dot menu > **Custom repositories**.
-2. Add `https://github.com/SurfHost/ha-enablebanking` with category **Integration**.
+2. Add `https://github.com/thomasd04/ha-enablebanking` with category **Integration**.
 3. Search for **Enable Banking** and install it.
 4. Restart Home Assistant.
 
@@ -74,7 +76,7 @@ The config flow has four steps:
 1. **Credentials** > paste the full contents of your application's private key (.pem) into the multi-line field and enter the application ID. The flow validates them by minting a JWT and fetching the bank list. On a second or later bank both fields come pre-filled from the entry you already have.
 2. **Country** > pick the country the bank is in. This just filters the (long) bank list.
 3. **Bank** > pick a bank from the dropdown (populated live from Enable Banking's ASPSP list) and select *Personal* or *Business*.
-4. **Authorise** > the flow shows a link to your bank's login page. Click it, log in, and you'll be redirected to `enablebanking.com?code=...`. Copy the `code` value from the URL bar and paste it back in HA. The integration exchanges it for a session and creates the balance sensors. A link is valid for about an hour: if the bank shows an error, or you land on `enablebanking.com?error=...` instead, submit the form with the field empty to get a new link.
+4. **Authorise** > the flow shows a link to your bank's login page. Click it, log in, and you'll be redirected to `enablebanking.com?code=...`. Copy the `code` value from the URL bar and paste it back in HA. The integration exchanges it for a session and creates balance and transaction sensors. A link is valid for about an hour: if the bank shows an error, or you land on `enablebanking.com?error=...` instead, submit the form with the field empty to get a new link.
 
 Repeat from the top to add more banks.
 
@@ -107,6 +109,10 @@ Select ASPSP **Revolut** and account type **Business**. Enable Banking uses a si
 | `last_polled_at` | ISO timestamp of the last successful fetch for this account |
 | `last_error` | Short tag if the most recent poll attempt failed: `rate_limited`, `network`, `consent_expired`, `auth`, `api`. Empty string on success. |
 | `stale` | Boolean, true when `last_polled_at` is older than 16 h (twice the 8 h nominal interval; the schedule itself is fixed, see below) |
+
+### Transactions (per account)
+
+The sensor state is the number of cached transactions. Its `transactions` attribute contains the latest 20 records, with dates, amount, currency, status, counterparty, and remittance text. The integration requests the most recent 90 days, follows up to five pages (250 records), and refreshes this feed once per day. Pending or planned transfers appear only when the bank returns them through Enable Banking's transactions endpoint.
 | `consent_expires_at` | ISO timestamp when the PSD2 consent expires |
 | `consent_days_remaining` | Integer days until expiry |
 

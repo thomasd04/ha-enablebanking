@@ -415,6 +415,12 @@ def _balance_from_stored(data: dict[str, Any]) -> AccountBalance | None:
             reference_date=data.get("reference_date")
             if isinstance(data.get("reference_date"), str)
             else None,
+            transactions=(
+                data.get("transactions")
+                if isinstance(data.get("transactions"), list)
+                else []
+            ),
+            transactions_last_fetched=_parse_iso(data.get("transactions_last_fetched")),
             last_polled_at=_parse_iso(data.get("last_polled_at")),
             rate_limited_until=_parse_iso(data.get("rate_limited_until")),
         )
@@ -434,6 +440,10 @@ def _balance_to_stored(ab: AccountBalance) -> dict[str, Any]:
         "balance": ab.balance,
         "balance_type": ab.balance_type,
         "reference_date": ab.reference_date,
+        "transactions": ab.transactions,
+        "transactions_last_fetched": (
+            ab.transactions_last_fetched.isoformat() if ab.transactions_last_fetched else None
+        ),
         "last_polled_at": ab.last_polled_at.isoformat() if ab.last_polled_at else None,
         "rate_limited_until": ab.rate_limited_until.isoformat() if ab.rate_limited_until else None,
     }

@@ -57,6 +57,41 @@ BALANCE_SENSOR = EnableBankingSensorDescription(
     },
 )
 
+TRANSACTIONS_SENSOR = EnableBankingSensorDescription(
+    key="transactions",
+    name="Transactions",
+    icon="mdi:format-list-bulleted",
+    value_fn=lambda acc: len(acc.transactions),
+    account_attrs_fn=lambda acc: {
+        # HA state attributes are intended for compact summaries. The API
+        # cache keeps the bounded 90-day result; expose only the latest 20.
+        "transactions": [
+            {
+                "booking_date": transaction.get("booking_date"),
+                "value_date": transaction.get("value_date"),
+                "amount": transaction.get("amount"),
+                "currency": transaction.get("currency"),
+                "status": transaction.get("status"),
+                "credit_debit_indicator": transaction.get("credit_debit_indicator"),
+                "counterparty": str(transaction.get("counterparty") or "")[:80],
+                "remittance_information": str(
+                    transaction.get("remittance_information") or ""
+                )[:120],
+                "reference_number": str(transaction.get("reference_number") or "")[:40],
+                "bank_transaction_code": str(
+                    transaction.get("bank_transaction_code") or ""
+                )[:80],
+            }
+            for transaction in acc.transactions[:20]
+        ],
+        "transactions_last_fetched_at": (
+            acc.transactions_last_fetched.isoformat()
+            if acc.transactions_last_fetched
+            else None
+        ),
+    },
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -80,7 +115,7 @@ async def async_setup_entry(
         # (and its entity_id / history) instead of orphaning it.
         _migrate_unique_ids(hass, entry, coordinator)
 
-        new_entities: list[EnableBankingBalanceSensor] = []
+        new_entities: list[SensorEntity] = []
         seen_ids: set[str] = set()
         if coordinator.data is not None:
             seen_ids.update(coordinator.data.accounts.keys())
@@ -93,7 +128,14 @@ async def async_setup_entry(
             if stable_id in known:
                 continue
             known.add(stable_id)
-            new_entities.append(EnableBankingBalanceSensor(coordinator, BALANCE_SENSOR, stable_id))
+            new_entities.extend(
+                (
+                    EnableBankingBalanceSensor(coordinator, BALANCE_SENSOR, stable_id),
+                    EnableBankingTransactionsSensor(
+                        coordinator, TRANSACTIONS_SENSOR, stable_id
+                    ),
+                )
+            )
         if new_entities:
             async_add_entities(new_entities)
 
@@ -271,6 +313,23 @@ class EnableBankingBalanceSensor(EnableBankingEntity, SensorEntity):
             attrs["consent_days_remaining"] = max(0, (data.consent_expires_at - utcnow()).days)
 
         return attrs
+
+
+class EnableBankingTransactionsSensor(EnableBankingBalanceSensor):
+    """Read-only recent transaction feed for one account."""
+
+    def __init__(
+        self,
+        coordinator: EnableBankingCoordinator,
+        description: EnableBankingSensorDescription,
+        stable_id: str,
+    ) -> None:
+        super().__init__(coordinator, description, stable_id)
+        self._attr_has_entity_name = True
+
+    @property
+    def name(self) -> str | None:
+        return "Transactions"
 
 
 def _is_stale(account: AccountBalance, update_interval: timedelta | None) -> bool:
